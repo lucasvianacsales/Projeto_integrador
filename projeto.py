@@ -1,87 +1,126 @@
 import requests
 import pandas as pd
-import numpy as np
-import time
+import streamlit as st
 
-ufs = [
-    11, 12, 13, 14, 15, 16, 17,
-    21, 22, 23, 24, 25, 26, 27, 28, 29,
-    31, 32, 33, 35,
-    41, 42, 43,
-    50, 51, 52, 53
-]
+st.set_page_config(page_title="Tabela 647 - IBGE", layout="wide")
 
-anos = range(2010, 2026)
+UFS = {
+    "RO": 11, "AC": 12, "AM": 13, "RR": 14, "PA": 15, "AP": 16, "TO": 17,
+    "MA": 21, "PI": 22, "CE": 23, "RN": 24, "PB": 25, "PE": 26, "AL": 27,
+    "SE": 28, "BA": 29, "MG": 31, "ES": 32, "RJ": 33, "SP": 35,
+    "PR": 41, "SC": 42, "RS": 43, "MS": 50, "MT": 51, "GO": 52, "DF": 53
+}
 
-todos_dfs = []
 
-for uf in ufs:
-    for ano in anos:
+def extrair_linhas(dados):
+    linhas = []
+
+    for var in dados:
+        for resultado in var.get("resultados", []):
+            classes = {}
+
+            for c in resultado.get("classificacoes", []):
+                nome = c.get("nome")
+                categoria = c.get("categoria", {})
+                if categoria:
+                    classes[nome] = list(categoria.values())[0]
+
+            for serie in resultado.get("series", []):
+                localidade = serie.get("localidade", {})
+                local = localidade.get("nome")
+
+                for periodo, valor in serie.get("serie", {}).items():
+                    linhas.append({
+                        "localidade": local,
+                        "periodo": periodo,
+                        "valor": valor,
+                        **classes,
+                    })
+
+    return linhas
+
+
+def buscar_tabela(ano_inicial, ano_final, estado):
+    linhas_totais = []
+
+    if estado == "Todos":
+        localidades = "N3[all]"
+    else:
+        codigo = UFS[estado]
+        localidades = f"N3[{codigo}]"
+
+    for ano in range(ano_inicial, ano_final + 1):
         url = (
             f"https://servicodados.ibge.gov.br/api/v3/agregados/647/"
             f"periodos/{ano}01-{ano}12/variaveis/51"
-            f"?localidades=N3[{uf}]&classificacao=41[all]|314[all]"
+            f"?localidades={localidades}&classificacao=314[all]|41[all]"
         )
 
-        print(f"Baixando UF {uf} - {ano}...")
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
 
-        try:
-            r = requests.get(url, timeout=120)
-            r.raise_for_status()
-            dados = r.json()
-        except requests.exceptions.RequestException as e:
-            print(f"Erro na UF {uf}, ano {ano}: {e}")
-            continue
+        dados = response.json()
+        linhas_totais.extend(extrair_linhas(dados))
 
-        linhas = []
+    df = pd.DataFrame(linhas_totais)
 
-        for var in dados:
-            id_variavel = var["id"]
-            nome_variavel = var["variavel"]
-            unidade = var.get("unidade")
+    if not df.empty:
+        df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
+        df = df.dropna(subset=["valor"])
 
-            for resultado in var["resultados"]:
-                classes = {}
+        df["periodo"] = pd.to_datetime(df["periodo"], format="%Y%m", errors="coerce")
+        df["ano"] = df["periodo"].dt.year.astype(str)
+        df["mes"] = df["periodo"].dt.month
 
-                for c in resultado["classificacoes"]:
-                    nome_classificacao = c["nome"]
-                    valor_classificacao = list(c["categoria"].values())[0]
-                    classes[nome_classificacao] = valor_classificacao
+        df = df.drop(columns=["periodo"])
 
-                for serie in resultado["series"]:
-                    local = serie["localidade"]["nome"]
-                    id_local = serie["localidade"]["id"]
+    return df
 
-                    for periodo, valor in serie["serie"].items():
-                        linhas.append({
-                            "id_variavel": id_variavel,
-                            "variavel": nome_variavel,
-                            "unidade": unidade,
-                            "id_localidade": id_local,
-                            "localidade": local,
-                            "periodo": periodo,
-                            "valor": valor,
-                            **classes
-                        })
 
-        if linhas:
-            df_parcial = pd.DataFrame(linhas)
-            todos_dfs.append(df_parcial)
+def main():
+    st.title("Tabela 647 - IBGE")
+    st.caption("Consulta por período e estado (ou todos).")
 
-        time.sleep(0.5)
+    with st.sidebar:
+        st.header("Filtros")
 
-df = pd.concat(todos_dfs, ignore_index=True)
+        ano_inicial = st.selectbox(
+            "Ano inicial",
+            list(range(2010, 2027)),
+            index=10
+        )
 
-df["valor"] = df["valor"].replace("..", np.nan)
-df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
-df = df.dropna(subset=["valor"]).copy()
+        ano_final = st.selectbox(
+            "Ano final",
+            list(range(2010, 2027)),
+            index=15
+        )
 
-df["periodo"] = pd.to_datetime(df["periodo"], format="%Y%m")
-df["ano"] = df["periodo"].dt.year
-df["mes"] = df["periodo"].dt.month
+        estado = st.selectbox(
+            "Estado",
+            ["Todos"] + list(UFS.keys()),
+            index=1
+        )
 
-df.to_csv("tabela_647_ufs_2010_2025.csv", index=False, encoding="utf-8-sig")
+        buscar = st.button("Buscar tabela")
 
-print(df.head())
-print(df.shape)
-print("Arquivo salvo com sucesso.")
+    if buscar:
+        if ano_inicial > ano_final:
+            st.error("Ano inicial não pode ser maior que o final.")
+            return
+
+        with st.spinner("Consultando API..."):
+            try:
+                df = buscar_tabela(ano_inicial, ano_final, estado)
+
+                if df.empty:
+                    st.warning("Nenhum dado encontrado.")
+                else:
+                    st.dataframe(df, use_container_width=True)
+
+            except requests.exceptions.RequestException as e:
+                st.error(f"Erro na API: {e}")
+
+
+if __name__ == "__main__":
+    main()
