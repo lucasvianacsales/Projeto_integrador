@@ -23,7 +23,13 @@ def extrair_linhas(dados):
                 nome = c.get("nome")
                 categoria = c.get("categoria", {})
                 if categoria:
-                    classes[nome] = list(categoria.values())[0]
+                    # Evita depender de "pegar o primeiro valor" (ordem do dict pode variar)
+                    valores = list(categoria.values())
+                    chave = f"class_{nome}"
+                    if len(valores) == 1:
+                        classes[chave] = valores[0]
+                    else:
+                        classes[chave] = "; ".join(map(str, valores))
 
             for serie in resultado.get("series", []):
                 localidade = serie.get("localidade", {})
@@ -40,6 +46,7 @@ def extrair_linhas(dados):
     return linhas
 
 
+@st.cache_data(show_spinner=False)
 def buscar_tabela(ano_inicial, ano_final, estado):
     linhas_totais = []
 
@@ -59,7 +66,11 @@ def buscar_tabela(ano_inicial, ano_final, estado):
         response = requests.get(url, timeout=60)
         response.raise_for_status()
 
-        dados = response.json()
+        try:
+            dados = response.json()
+        except ValueError as e:
+            # response.json() falha quando a resposta não é JSON válido
+            raise requests.exceptions.RequestException(f"Resposta inválida (não JSON): {e}")
         linhas_totais.extend(extrair_linhas(dados))
 
     df = pd.DataFrame(linhas_totais)
@@ -69,6 +80,7 @@ def buscar_tabela(ano_inicial, ano_final, estado):
         df = df.dropna(subset=["valor"])
 
         df["periodo"] = pd.to_datetime(df["periodo"], format="%Y%m", errors="coerce")
+        df = df.dropna(subset=["periodo"])
         df["ano"] = df["periodo"].dt.year.astype(str)
         df["mes"] = df["periodo"].dt.month
 
